@@ -9,6 +9,7 @@ var STATE = {
   SEPARATOR : 4
 };
 
+var protocolRegex = /WARC\/\d+\.\d+$/;
 var headerRegex = /^([^\:]+)\: ([^$]+)$/;
 
 function WARCStream(opts) {
@@ -61,6 +62,17 @@ WARCStream.prototype._transform = function (chunk, enc, cb) {
         result = this.parseHeaders();
         if (result) {
           this.contentLength = parseInt(this.headers['Content-Length']);
+          if (Number.isNaN(this.contentLength)) {
+            // The `contentLength` header is required, but, if anything goes wrong while
+            // parsing headers and the resulting length is `NaN` the state enters `STATE.CONTENT`
+            // and the content buffer is filled until the process runs out of memory.
+            // By bailing out of this record and searching for the next protocol header we can at
+            // least continue from the record after this one rather than crashing.
+            this.emit('invalidContentLength',
+                this.data.slice(Math.max(0, this.offset - 2000), this.offset + 2000).toString());
+            this.state = STATE.PROTOCOL;
+            break;
+          }
           this.content = new Buffer(0);
           this.emit('headers', this.headers);
         }
@@ -107,16 +119,18 @@ WARCStream.prototype.parseProtocol = function () {
   var idx = firstMatch(this.matcher, this.data, this.offset);
 
   if (idx !== false && idx <= this.data.length) {
-    var protocol = this.data.slice(this.offset, idx);
+    var protocol = this.data.slice(this.offset, idx).toString().match(protocolRegex);
     this.offset = idx + this.matcher.length;
-    this.protocol = protocol.toString();
-    return true;
-  } else {
-    return false;
+    if (protocol) {
+      this.protocol = protocol[0];
+      return true;
+    }
   }
+
+  return false;
 };
 
-WARCStream.prototype.parseHeaders = function () {
+WARCStream.prototype.parseHeaders = function() {
   var result;
   do {
     result = this.parseHeader();
@@ -128,7 +142,7 @@ WARCStream.prototype.parseHeader = function () {
   var idx = firstMatch(this.matcher, this.data, this.offset);
 
   if (idx !== false && idx < this.data.length) {
-    var header= this.data.slice(this.offset, idx);
+    var header = this.data.slice(this.offset, idx);
     this.offset = idx + this.matcher.length;
 
     if (header.length === 0) {
@@ -171,7 +185,6 @@ WARCStream.prototype.parseSeparator = function () {
 };
 
 function firstMatch(matcher, buf, offset) {
-  var i = offset;
   if (offset >= buf.length) return false;
   for (var i = offset; i < buf.length; i++) {
     if (buf[i] === matcher[0]) {
